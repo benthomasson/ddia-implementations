@@ -159,8 +159,6 @@ class RaftNode:
 
         entry = LogEntry(term=self._current_term, index=self._last_log_index() + 1, command=command)
         self._log.append(entry)
-        # Update own match_index
-        self._match_index[self._node_id] = entry.index
         return {"success": True, "entry": entry, "error": None}
 
     def tick(self, elapsed_ms):
@@ -192,8 +190,8 @@ class RaftNode:
     def _make_append_entries(self, peer):
         ni = self._next_index.get(peer, 1)
         prev_index = ni - 1
-        prev_term = self._log[prev_index].term if prev_index < len(self._log) else 0
-        entries = self._log[ni:] if ni < len(self._log) else []
+        prev_term = self._log[prev_index].term
+        entries = self._log[ni:]
         return {
             "type": "append_entries",
             "to": peer,
@@ -218,7 +216,7 @@ class RaftNode:
             if count > total // 2:
                 self._commit_index = n
 
-    def _handle_vote_response(self, from_id, term, vote_granted):
+    def handle_vote_response(self, from_id, term, vote_granted):
         if term > self._current_term:
             self._become_follower(term)
             return
@@ -232,7 +230,7 @@ class RaftNode:
             if len(self._votes_received) > total // 2:
                 self._become_leader()
 
-    def _handle_append_response(self, from_id, term, success, match_index):
+    def handle_append_response(self, from_id, term, success, match_index):
         if term > self._current_term:
             self._become_follower(term)
             return
@@ -281,14 +279,14 @@ class RaftCluster:
                 )
                 # Deliver response back to sender
                 if sender not in self._partitioned:
-                    self.nodes[sender]._handle_vote_response(receiver, resp["term"], resp["vote_granted"])
+                    self.nodes[sender].handle_vote_response(receiver, resp["term"], resp["vote_granted"])
             elif msg["type"] == "append_entries":
                 resp = node.handle_append_entries(
                     sender, msg["term"], msg["prev_log_index"], msg["prev_log_term"],
                     msg["entries"], msg["leader_commit"]
                 )
                 if sender not in self._partitioned:
-                    self.nodes[sender]._handle_append_response(receiver, resp["term"], resp["success"], resp["match_index"])
+                    self.nodes[sender].handle_append_response(receiver, resp["term"], resp["success"], resp["match_index"])
 
     def run_until_leader(self, max_ticks=1000):
         for _ in range(max_ticks):
@@ -309,9 +307,9 @@ class RaftCluster:
         for _ in range(max_ticks):
             self.tick(10)
             count = 0
-            total = len(self.nodes)
-            for node in self.nodes.values():
-                if node.commit_index >= index:
+            total = len(self.nodes) - len(self._partitioned)
+            for nid, node in self.nodes.items():
+                if nid not in self._partitioned and node.commit_index >= index:
                     count += 1
             if count > total // 2:
                 return True
