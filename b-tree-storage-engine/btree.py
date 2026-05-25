@@ -2,6 +2,7 @@
 
 import os
 import struct
+import zlib
 from bisect import bisect_left, bisect_right
 
 # Page types
@@ -99,11 +100,17 @@ class PageManager:
         self.write_page(page_num, data)
         self.write_meta(root, height, total_keys, next_free, page_num)
 
+    def sync(self):
+        self._f.flush()
+        os.fsync(self._f.fileno())
+
     def reset_counters(self):
         self.pages_read = 0
         self.pages_written = 0
 
     def close(self):
+        self._f.flush()
+        os.fsync(self._f.fileno())
         self._f.close()
 
 
@@ -113,7 +120,6 @@ class WAL:
     # Entry format: seq(4B) + page_num(4B) + data_len(4B) + data + checksum(4B)
     ENTRY_HEADER = '>III'
     ENTRY_HEADER_SIZE = struct.calcsize('>III')
-    COMMIT_MARKER = b'CMIT'
 
     def __init__(self, wal_path):
         self.wal_path = wal_path
@@ -130,27 +136,19 @@ class WAL:
         self._f.flush()
         os.fsync(self._f.fileno())
 
-    def commit(self):
-        self._f.seek(0, 2)
-        self._f.write(self.COMMIT_MARKER)
-        self._f.flush()
-        os.fsync(self._f.fileno())
-        # Truncate
+    def commit(self, page_manager):
+        page_manager.sync()
         self._f.seek(0)
         self._f.truncate(0)
         self._f.flush()
+        os.fsync(self._f.fileno())
         self._seq = 0
 
     def recover(self, page_manager):
         self._f.seek(0)
         data = self._f.read()
-        if not data or self.COMMIT_MARKER in data:
-            # Either empty or committed — nothing to recover
-            self._f.seek(0)
-            self._f.truncate(0)
-            self._f.flush()
+        if not data:
             return 0
-        # Replay entries
         offset = 0
         recovered = 0
         while offset + self.ENTRY_HEADER_SIZE <= len(data):
@@ -158,7 +156,7 @@ class WAL:
                 self.ENTRY_HEADER, data[offset:offset + self.ENTRY_HEADER_SIZE])
             offset += self.ENTRY_HEADER_SIZE
             if offset + data_len + 4 > len(data):
-                break  # incomplete entry
+                break
             page_data = data[offset:offset + data_len]
             offset += data_len
             checksum = struct.unpack('>I', data[offset:offset + 4])[0]
@@ -166,18 +164,16 @@ class WAL:
             if self._checksum(page_data) == checksum:
                 page_manager.write_page(page_num, page_data)
                 recovered += 1
+        page_manager.sync()
         self._f.seek(0)
         self._f.truncate(0)
         self._f.flush()
+        os.fsync(self._f.fileno())
         return recovered
 
     @staticmethod
     def _checksum(data):
-        # Simple checksum: sum of bytes mod 2^32
-        s = 0
-        for b in data:
-            s = (s + b) & 0xFFFFFFFF
-        return s
+        return zlib.crc32(data) & 0xFFFFFFFF
 
     def close(self):
         self._f.close()
@@ -297,6 +293,13 @@ class BTree:
         self.wal.log_write(page_num, padded)
         self.pm.write_page(page_num, padded)
 
+    def _wal_write_meta(self, root, height, total_keys, next_free, free_head):
+        """Log metadata to WAL then write."""
+        data = struct.pack(META_FMT, root, height, total_keys, next_free, free_head)
+        padded = data.ljust(self.page_size, b'\x00')
+        self.wal.log_write(0, padded)
+        self.pm.write_meta(root, height, total_keys, next_free, free_head)
+
     def get(self, key):
         """Look up a value by key. Returns None if not found."""
         self.pm.reset_counters()
@@ -320,7 +323,6 @@ class BTree:
 
     def put(self, key, value):
         """Insert or update a key-value pair."""
-        # Check size
         kb = key.encode('utf-8')
         entry_size = HEADER_SIZE + 4 + 2 + len(kb) + 2 + len(value)
         if entry_size > self.page_size:
@@ -331,24 +333,22 @@ class BTree:
         result = self._insert(root, key, value, height)
 
         if result is None:
-            # Updated existing key, no size change
-            self.wal.commit()
+            self.wal.commit(self.pm)
             return
 
         if result == 'inserted':
-            # Simple insert, no split
-            self._write_meta(root, height, total_keys + 1, *self._read_meta()[3:])
-            self.wal.commit()
+            root, height, _, next_free, free_head = self._read_meta()
+            self._wal_write_meta(root, height, total_keys + 1, next_free, free_head)
+            self.wal.commit(self.pm)
             return
 
-        # Split happened at root: result = (mid_key, new_page_num)
         mid_key, new_page = result
         new_root = self.pm.allocate_page()
         root_data = _serialize_internal([mid_key], [root, new_page])
         self._wal_write_page(new_root, root_data)
-        meta = self.pm.read_meta()
-        self._write_meta(new_root, height + 1, total_keys + 1, meta[3], meta[4])
-        self.wal.commit()
+        _, _, _, next_free, free_head = self._read_meta()
+        self._wal_write_meta(new_root, height + 1, total_keys + 1, next_free, free_head)
+        self.wal.commit(self.pm)
 
     def _insert(self, page_num, key, value, depth):
         """Insert into subtree rooted at page_num.
@@ -434,12 +434,13 @@ class BTree:
         root, height, total_keys, next_free, free_head = self._read_meta()
         found = self._delete(root, key, height)
         if found:
-            meta = self.pm.read_meta()
-            self._write_meta(meta[0], meta[1], total_keys - 1, meta[3], meta[4])
-            self.wal.commit()
-        return found
+            _, _, _, next_free, free_head = self._read_meta()
+            self._wal_write_meta(root, height, total_keys - 1, next_free, free_head)
+            self.wal.commit(self.pm)
+        return bool(found)
 
     def _delete(self, page_num, key, depth):
+        """Returns False (not found), True (deleted), or 'empty' (deleted, leaf now empty)."""
         data = self.pm.read_page(page_num)
 
         if depth == 1:
@@ -451,11 +452,30 @@ class BTree:
             values.pop(idx)
             new_data = _serialize_leaf(keys, values, next_sib)
             self._wal_write_page(page_num, new_data)
-            return True
+            return 'empty' if not keys else True
         else:
             ikeys, children = _deserialize_internal(data)
             idx = bisect_right(ikeys, key)
-            return self._delete(children[idx], key, depth - 1)
+            result = self._delete(children[idx], key, depth - 1)
+
+            if result == 'empty' and depth == 2 and idx > 0:
+                child_page = children[idx]
+                empty_data = self.pm.read_page(child_page)
+                _, _, empty_next_sib = _deserialize_leaf(empty_data)
+                prev_data = self.pm.read_page(children[idx - 1])
+                prev_keys, prev_vals, _ = _deserialize_leaf(prev_data)
+                self._wal_write_page(
+                    children[idx - 1],
+                    _serialize_leaf(prev_keys, prev_vals, empty_next_sib))
+                ikeys.pop(idx - 1)
+                children.pop(idx)
+                self.pm.free_page(child_page)
+                self._wal_write_page(page_num, _serialize_internal(ikeys, children))
+                return True
+
+            if result == 'empty':
+                return True
+            return result
 
     def contains(self, key):
         return self.get(key) is not None
@@ -567,7 +587,7 @@ class BTree:
                 self._count_pages(c, depth - 1, counts)
 
     def close(self):
-        self.wal.commit()
+        self.wal.commit(self.pm)
         self.wal.close()
         self.pm.close()
 

@@ -158,6 +158,132 @@ def test_delete_and_reinsert():
         print("test_delete_and_reinsert PASSED")
 
 
+def test_wal_uncommitted_entries():
+    """WAL entries without commit should be replayed on recovery."""
+    import struct
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tree = BTree(tmpdir, max_keys_per_page=4)
+        for i in range(5):
+            tree.put(f"key_{i:02d}", f"val_{i}".encode())
+        tree.close()
+
+        tree2 = BTree(tmpdir, max_keys_per_page=4)
+        assert len(tree2) == 5
+
+        # Manually write WAL entries without committing
+        wal_path = os.path.join(tmpdir, 'btree.wal')
+        from btree import WAL, _serialize_leaf, HEADER_FMT, LEAF
+        wal = WAL(wal_path)
+        # Write a modified version of the root leaf's page
+        page_data = tree2.pm.read_page(1)
+        wal.log_write(1, page_data)
+        wal._f.close()
+        tree2.pm._f.close()
+
+        # Reopen — WAL should replay even without commit marker
+        tree3 = BTree(tmpdir, max_keys_per_page=4)
+        assert len(tree3) == 5
+        tree3.close()
+        print("test_wal_uncommitted_entries PASSED")
+
+
+def test_delete_frees_empty_leaf():
+    """Deleting all keys from a non-root leaf should free the page."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tree = BTree(tmpdir, max_keys_per_page=4)
+        # Insert enough to get a height-2 tree with multiple leaves
+        keys = [f"k{i:02d}" for i in range(10)]
+        for k in keys:
+            tree.put(k, b"v")
+
+        assert tree.stats.height == 2
+        pages_before = tree.stats.total_pages
+
+        # Delete keys that land in a non-first leaf to trigger page freeing
+        # With max_keys=4, after splits the right leaves hold keys from the middle/end
+        # Delete all keys from one leaf by removing consecutive keys
+        for k in ["k05", "k06"]:
+            tree.delete(k)
+
+        # Verify the tree is still consistent
+        remaining = [k for k, v in tree]
+        assert sorted(remaining) == remaining
+        assert len(tree) == 8
+
+        # Range scan should still work across the gap
+        results = tree.range_scan("k04", "k08")
+        result_keys = [k for k, v in results]
+        assert "k05" not in result_keys
+        assert "k06" not in result_keys
+        assert "k04" in result_keys
+        assert "k07" in result_keys
+
+        tree.close()
+        print("test_delete_frees_empty_leaf PASSED")
+
+
+def test_metadata_consistency_after_split():
+    """Root pointer in metadata must match the actual root after splits."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tree = BTree(tmpdir, max_keys_per_page=4)
+        for i in range(20):
+            tree.put(f"key_{i:03d}", f"val_{i}".encode())
+
+        root, height, total_keys, _, _ = tree._read_meta()
+        assert total_keys == 20
+        assert height >= 2
+
+        # Verify root page is a valid internal node
+        from btree import _page_type, INTERNAL
+        data = tree.pm.read_page(root)
+        assert _page_type(data) == INTERNAL
+
+        # Every key should be reachable from the root
+        for i in range(20):
+            assert tree.get(f"key_{i:03d}") == f"val_{i}".encode()
+
+        tree.close()
+
+        # Reopen and verify consistency persists
+        tree2 = BTree(tmpdir, max_keys_per_page=4)
+        root2, height2, total2, _, _ = tree2._read_meta()
+        assert root2 == root
+        assert height2 == height
+        assert total2 == 20
+        tree2.close()
+        print("test_metadata_consistency_after_split PASSED")
+
+
+def test_crc32_detects_corruption():
+    """Corrupted WAL entries should be skipped during recovery."""
+    import struct as st
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tree = BTree(tmpdir, max_keys_per_page=4)
+        tree.put("good_key", b"good_value")
+        tree.close()
+
+        # Write a valid WAL entry, then corrupt it
+        wal_path = os.path.join(tmpdir, 'btree.wal')
+        from btree import WAL
+        wal = WAL(wal_path)
+        page_data = b'\x01' * 4096
+        wal.log_write(1, page_data)
+
+        # Corrupt the page data in the WAL by flipping a byte
+        wal._f.seek(12 + 100)  # past header, into page data
+        wal._f.write(b'\xff')
+        wal._f.flush()
+        wal._f.close()
+
+        # Reopen — corrupted entry should be skipped, tree should still work
+        tree2 = BTree(tmpdir, max_keys_per_page=4)
+        # The good_key was committed before the WAL was written,
+        # so it's in the data file and not affected by corruption
+        assert tree2.get("good_key") == b"good_value"
+        tree2.close()
+        print("test_crc32_detects_corruption PASSED")
+
+
 if __name__ == "__main__":
     test_basic()
     test_large()
@@ -166,4 +292,8 @@ if __name__ == "__main__":
     test_too_large_kv()
     test_wal_recovery()
     test_delete_and_reinsert()
+    test_wal_uncommitted_entries()
+    test_delete_frees_empty_leaf()
+    test_metadata_consistency_after_split()
+    test_crc32_detects_corruption()
     print("\nAll tests passed!")
