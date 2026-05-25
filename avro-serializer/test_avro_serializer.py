@@ -191,5 +191,135 @@ def test_invalid_schemas():
         Schema(["int", "int"])  # duplicate union types
 
 
+# --- Test 9: Fixed type ---
+
+def test_fixed_roundtrip():
+    s = Schema({"type": "fixed", "name": "IPv4", "size": 4})
+    val = b"\xc0\xa8\x01\x01"
+    encoded = AvroEncoder(s).encode(val)
+    assert len(encoded) == 4
+    assert AvroDecoder(s).decode(encoded) == val
+
+
+def test_fixed_wrong_size_rejected():
+    s = Schema({"type": "fixed", "name": "IPv4", "size": 4})
+    with pytest.raises(ValueError):
+        AvroEncoder(s).encode(b"\x00\x01")
+
+
+def test_fixed_schema_validation():
+    with pytest.raises(SchemaError):
+        Schema({"type": "fixed", "name": "F"})  # missing size
+    with pytest.raises(SchemaError):
+        Schema({"type": "fixed", "size": 4})  # missing name
+
+
+def test_fixed_compatibility():
+    s1 = Schema({"type": "fixed", "name": "Hash", "size": 16})
+    s2 = Schema({"type": "fixed", "name": "Hash", "size": 16})
+    compat = check_compatibility(s1, s2)
+    assert compat["full_compatible"] is True
+
+    s3 = Schema({"type": "fixed", "name": "Hash", "size": 32})
+    compat2 = check_compatibility(s1, s3)
+    assert compat2["backward_compatible"] is False
+
+
+def test_fixed_in_record():
+    schema = Schema({"type": "record", "name": "Msg", "fields": [
+        {"name": "id", "type": "int"},
+        {"name": "checksum", "type": {"type": "fixed", "name": "MD5", "size": 16}},
+    ]})
+    val = {"id": 42, "checksum": b"\x00" * 16}
+    assert AvroDecoder(schema).decode(AvroEncoder(schema).encode(val)) == val
+
+
+# --- Test 10: Schema canonical equality ---
+
+def test_schema_equality_canonical():
+    """Schema("int") and Schema({"type": "int"}) should be equal."""
+    assert Schema("int") == Schema({"type": "int"})
+    assert Schema("string") == Schema({"type": "string"})
+
+
+def test_schema_equality_complex():
+    s1 = Schema({"type": "record", "name": "R", "fields": [
+        {"name": "x", "type": "int"},
+    ]})
+    s2 = Schema({"type": "record", "name": "R", "fields": [
+        {"name": "x", "type": {"type": "int"}},
+    ]})
+    assert s1 == s2
+
+
+def test_schema_hashable():
+    s1 = Schema("int")
+    s2 = Schema({"type": "int"})
+    assert hash(s1) == hash(s2)
+    assert len({s1, s2}) == 1
+
+
+# --- Test 11: Record field reordering ---
+
+def test_record_field_reorder():
+    """Writer and reader have same fields in different order."""
+    writer = Schema({"type": "record", "name": "R", "fields": [
+        {"name": "a", "type": "int"},
+        {"name": "b", "type": "string"},
+        {"name": "c", "type": "double"},
+    ]})
+    reader = Schema({"type": "record", "name": "R", "fields": [
+        {"name": "c", "type": "double"},
+        {"name": "a", "type": "int"},
+        {"name": "b", "type": "string"},
+    ]})
+    val = {"a": 1, "b": "hello", "c": 3.14}
+    data = AvroEncoder(writer).encode(val)
+    result = AvroDecoder(writer, reader).decode(data)
+    assert result == val
+
+
+# --- Test 12: Union dict ambiguity (record vs map) ---
+
+def test_union_record_vs_map():
+    """Union with record and map types should disambiguate dicts correctly."""
+    record_schema = {"type": "record", "name": "Point", "fields": [
+        {"name": "x", "type": "int"},
+        {"name": "y", "type": "int"},
+    ]}
+    union = Schema([record_schema, {"type": "map", "values": "int"}])
+    enc = AvroEncoder(union)
+    dec = AvroDecoder(union)
+
+    # Dict matching record fields -> record branch
+    record_val = {"x": 1, "y": 2}
+    assert dec.decode(enc.encode(record_val)) == record_val
+
+    # Dict with non-record keys -> map branch
+    map_val = {"arbitrary": 10, "keys": 20}
+    assert dec.decode(enc.encode(map_val)) == map_val
+
+
+# --- Test 13: Int range validation ---
+
+def test_int_range_overflow():
+    s = Schema("int")
+    enc = AvroEncoder(s)
+    enc.encode(2147483647)  # max int32, should work
+    enc.encode(-2147483648)  # min int32, should work
+    with pytest.raises(ValueError):
+        enc.encode(2147483648)  # int32 + 1
+    with pytest.raises(ValueError):
+        enc.encode(-2147483649)
+
+
+def test_long_accepts_large_values():
+    s = Schema("long")
+    enc = AvroEncoder(s)
+    dec = AvroDecoder(s)
+    val = 2**40
+    assert dec.decode(enc.encode(val)) == val
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

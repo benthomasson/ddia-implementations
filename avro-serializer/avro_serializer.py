@@ -4,6 +4,7 @@ import io
 import struct
 
 PRIMITIVES = {"null", "boolean", "int", "long", "float", "double", "string", "bytes"}
+_NO_DEFAULT = object()
 PROMOTIONS = {
     ("int", "long"), ("int", "float"), ("int", "double"),
     ("long", "float"), ("long", "double"),
@@ -126,6 +127,14 @@ class Schema:
                 if "default" in defn:
                     parsed["default"] = defn["default"]
                 return parsed
+            if t == "fixed":
+                name = defn.get("name")
+                if not name:
+                    raise SchemaError("Fixed must have a name")
+                size = defn.get("size")
+                if size is None or not isinstance(size, int) or size < 0:
+                    raise SchemaError("Fixed must have a non-negative integer size")
+                return {"type": "fixed", "name": name, "size": size}
             if isinstance(t, str) and t in PRIMITIVES:
                 return {"type": t}
             raise SchemaError(f"Unknown schema type: {t}")
@@ -156,6 +165,10 @@ class Schema:
         return self._parsed.get("symbols", [])
 
     @property
+    def size(self):
+        return self._parsed.get("size")
+
+    @property
     def union_types(self):
         return self._parsed.get("types", [])
 
@@ -169,10 +182,38 @@ class Schema:
     def to_dict(self):
         return self._def
 
+    def _canonical_form(self):
+        return self._canonicalize(self._parsed)
+
+    def _canonicalize(self, p):
+        t = p["type"]
+        if t in PRIMITIVES:
+            return t
+        if t == "union":
+            return ("union", tuple(s._canonical_form() for s in p["types"]))
+        if t == "record":
+            fields = tuple(
+                (f["name"], f["type"]._canonical_form(), f.get("default", _NO_DEFAULT))
+                for f in p["fields"]
+            )
+            return ("record", p["name"], fields)
+        if t == "array":
+            return ("array", p["items"]._canonical_form())
+        if t == "map":
+            return ("map", p["values"]._canonical_form())
+        if t == "enum":
+            return ("enum", p["name"], tuple(p["symbols"]))
+        if t == "fixed":
+            return ("fixed", p["name"], p["size"])
+        return t
+
     def __eq__(self, other):
         if not isinstance(other, Schema):
             return NotImplemented
-        return self._def == other._def
+        return self._canonical_form() == other._canonical_form()
+
+    def __hash__(self):
+        return hash(self._canonical_form())
 
     def __repr__(self):
         return f"Schema({self._def!r})"
@@ -198,7 +239,13 @@ class AvroEncoder:
                 raise ValueError(f"Expected None for null schema, got {type(value)}")
         elif t == "boolean":
             buf.write(b'\x01' if value else b'\x00')
-        elif t == "int" or t == "long":
+        elif t == "int":
+            if value < -2147483648 or value > 2147483647:
+                raise ValueError(f"Value {value} out of range for Avro int (32-bit signed)")
+            write_long(buf, value)
+        elif t == "long":
+            if value < -9223372036854775808 or value > 9223372036854775807:
+                raise ValueError(f"Value {value} out of range for Avro long (64-bit signed)")
             write_long(buf, value)
         elif t == "float":
             buf.write(struct.pack('<f', value))
@@ -240,6 +287,10 @@ class AvroEncoder:
         elif t == "enum":
             idx = schema.symbols.index(value)
             write_long(buf, idx)
+        elif t == "fixed":
+            if len(value) != schema.size:
+                raise ValueError(f"Fixed requires exactly {schema.size} bytes, got {len(value)}")
+            buf.write(value)
         else:
             raise ValueError(f"Unknown type: {t}")
 
@@ -260,13 +311,18 @@ class AvroEncoder:
             if isinstance(value, (bytes, bytearray)) and t == "bytes":
                 return i
             if isinstance(value, dict) and t == "record":
-                return i
+                field_names = {f["name"] for f in s.fields}
+                if set(value.keys()).issubset(field_names):
+                    return i
             if isinstance(value, list) and t == "array":
                 return i
             if isinstance(value, dict) and t == "map":
                 return i
             if isinstance(value, str) and t == "enum":
                 if value in s.symbols:
+                    return i
+            if isinstance(value, (bytes, bytearray)) and t == "fixed":
+                if len(value) == s.size:
                     return i
         raise ValueError(f"No matching union branch for value: {value!r}")
 
@@ -341,6 +397,16 @@ class AvroDecoder:
                 return reader.default
             raise SchemaCompatibilityError(
                 f"Enum symbol '{symbol}' not in reader schema and no default")
+
+        # Fixed
+        if wt == "fixed" and rt == "fixed":
+            if writer.name != reader.name:
+                raise SchemaCompatibilityError(
+                    f"Fixed name mismatch: {writer.name} vs {reader.name}")
+            if writer.size != reader.size:
+                raise SchemaCompatibilityError(
+                    f"Fixed size mismatch: {writer.size} vs {reader.size}")
+            return buf.read(writer.size)
 
         raise SchemaCompatibilityError(f"Cannot resolve {wt} to {rt}")
 
@@ -425,9 +491,8 @@ class AvroDecoder:
                 if count == 0:
                     break
                 if count < 0:
-                    # block with size prefix
                     count = -count
-                    # Not implementing negative-count blocks with byte size; just skip items
+                    read_long(buf)  # byte size of block
                 for _ in range(count):
                     self._skip(buf, schema.items)
         elif t == "map":
@@ -435,6 +500,9 @@ class AvroDecoder:
                 count = read_long(buf)
                 if count == 0:
                     break
+                if count < 0:
+                    count = -count
+                    read_long(buf)  # byte size of block
                 for _ in range(count):
                     klen = read_long(buf)
                     buf.read(klen)
@@ -444,6 +512,8 @@ class AvroDecoder:
             self._skip(buf, schema.union_types[idx])
         elif t == "enum":
             read_long(buf)
+        elif t == "fixed":
+            buf.read(schema.size)
 
     def _read_array(self, buf, writer_items, reader_items):
         result = []
@@ -453,6 +523,7 @@ class AvroDecoder:
                 break
             if count < 0:
                 count = -count
+                read_long(buf)  # byte size of block
             for _ in range(count):
                 result.append(self._decode(buf, writer_items, reader_items))
         return result
@@ -465,6 +536,7 @@ class AvroDecoder:
                 break
             if count < 0:
                 count = -count
+                read_long(buf)  # byte size of block
             for _ in range(count):
                 klen = read_long(buf)
                 key = buf.read(klen).decode('utf-8')
@@ -476,7 +548,9 @@ class AvroDecoder:
         wn = writer_schema.name
         for rs in reader_union_types:
             if wt == rs.type_name:
-                if wt in PRIMITIVES:
+                if wt in PRIMITIVES or wt in ("array", "map"):
+                    return rs
+                if wt == "fixed" and wn == rs.name and writer_schema.size == rs.size:
                     return rs
                 if wn and wn == rs.name:
                     return rs
@@ -569,11 +643,19 @@ def _resolve_check(writer, reader):
         if writer.name != reader.name:
             raise SchemaCompatibilityError(
                 f"Enum name mismatch: {writer.name} vs {reader.name}")
-        # Check if any writer symbols missing from reader
         for sym in writer.symbols:
             if sym not in reader.symbols and not reader.has_default():
                 raise SchemaCompatibilityError(
                     f"Writer enum symbol '{sym}' not in reader and no default")
+        return
+
+    if wt == "fixed" and rt == "fixed":
+        if writer.name != reader.name:
+            raise SchemaCompatibilityError(
+                f"Fixed name mismatch: {writer.name} vs {reader.name}")
+        if writer.size != reader.size:
+            raise SchemaCompatibilityError(
+                f"Fixed size mismatch: {writer.size} vs {reader.size}")
         return
 
     raise SchemaCompatibilityError(f"Incompatible types: {wt} vs {rt}")
