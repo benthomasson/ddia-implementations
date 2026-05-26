@@ -161,8 +161,6 @@ class ScalableBloomFilter:
 
     def add(self, item):
         """Add an item, creating a new slice if current one is full."""
-        if item in self:
-            return
         current, cap = self._slices[-1]
         if len(current) >= cap:
             self._add_slice()

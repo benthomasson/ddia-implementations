@@ -104,6 +104,17 @@ def test_empty_filter():
     assert bf.bit_array_density() == 0.0
 
 
+def test_scalable_no_false_negatives():
+    """ScalableBloomFilter must not drop items across slice boundaries."""
+    sbf = ScalableBloomFilter(initial_capacity=50, false_positive_rate=0.01)
+    items = [f"item-{i}" for i in range(1000)]
+    for item in items:
+        sbf.add(item)
+    assert len(sbf) == 1000
+    for item in items:
+        assert item in sbf, f"False negative for {item}"
+
+
 def test_determinism():
     bf1 = BloomFilter(expected_items=100, false_positive_rate=0.01)
     bf2 = BloomFilter(expected_items=100, false_positive_rate=0.01)
