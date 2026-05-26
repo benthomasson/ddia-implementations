@@ -193,6 +193,56 @@ def test_file_input():
         os.unlink(tmp_path)
 
 
+def test_records_in_counts():
+    """records_in should match upstream stage's records_out, not be double-counted."""
+    p = Pipeline()
+    p.add_stage(ReadLines(TEXT))
+    p.add_stage(Tokenize())
+    p.add_stage(Count())
+    p.add_stage(Sort(by="value", descending=True))
+    p.run()
+    s = p.stats.stages
+    assert s[0]['records_in'] == 0
+    assert s[1]['records_in'] == s[0]['records_out']
+    assert s[2]['records_in'] == s[1]['records_out']
+    assert s[3]['records_in'] == s[2]['records_out']
+
+
+def test_external_sort_descending():
+    """Descending external sort should produce correct order."""
+    p = Pipeline()
+    p.add_stage(ReadLines(TEXT))
+    p.add_stage(Tokenize())
+    p.add_stage(Count())
+    p.add_stage(Sort(by="value", descending=True, memory_limit=3))
+    result = p.run()
+    vals = [v for k, v in result]
+    assert vals == sorted(vals, reverse=True), f"Not descending: {vals}"
+    assert result[0] == ("the", 6)
+    # Also test descending by key
+    p2 = Pipeline()
+    p2.add_stage(ReadLines(TEXT))
+    p2.add_stage(Tokenize())
+    p2.add_stage(Count())
+    p2.add_stage(Sort(by="key", descending=True, memory_limit=3))
+    result2 = p2.run()
+    keys = [k for k, v in result2]
+    assert keys == sorted(keys, reverse=True), f"Not descending: {keys}"
+
+
+def test_lazy_stats():
+    """run_lazy() should populate stats after iterator is fully consumed."""
+    p = Pipeline()
+    p.add_stage(ReadLines(TEXT))
+    p.add_stage(Tokenize())
+    p.add_stage(Count())
+    assert p.stats is None
+    result = list(p.run_lazy())
+    assert p.stats is not None
+    assert p.stats.total_records_out == len(result)
+    assert p.stats.total_records_out > 0
+
+
 if __name__ == "__main__":
     tests = [
         test_word_count_example,
@@ -206,6 +256,9 @@ if __name__ == "__main__":
         test_flatmap,
         test_pipeline_stats,
         test_file_input,
+        test_records_in_counts,
+        test_external_sort_descending,
+        test_lazy_stats,
     ]
     passed = 0
     failed = 0

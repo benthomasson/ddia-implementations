@@ -34,12 +34,15 @@ class Stage:
     def _tracked_process(self, input_iter):
         """Wrap process with stats tracking."""
         start = time.monotonic()
+        downstream = 0.0
         try:
             for record in self.process(input_iter):
                 self.records_out += 1
+                t = time.monotonic()
                 yield record
+                downstream += time.monotonic() - t
         finally:
-            self.elapsed_seconds = time.monotonic() - start
+            self.elapsed_seconds = time.monotonic() - start - downstream
 
     def _count_input(self, input_iter):
         """Wrap input iterator to count records."""
@@ -125,7 +128,7 @@ class Sort(Stage):
                     if tmp_dir is None:
                         tmp_dir = tempfile.mkdtemp()
                     chunk_path = os.path.join(tmp_dir, f"chunk_{len(chunk_files)}.jsonl")
-                    buffer.sort(key=self._sort_key)
+                    buffer.sort(key=self._sort_key, reverse=self.descending)
                     with open(chunk_path, 'w') as f:
                         for rec in buffer:
                             f.write(json.dumps(rec) + '\n')
@@ -133,22 +136,20 @@ class Sort(Stage):
                     buffer.clear()
 
             if not chunk_files:
-                # Everything fit in memory
                 buffer.sort(key=self._sort_key, reverse=self.descending)
                 yield from buffer
             else:
-                # Spill remaining buffer
                 if buffer:
                     chunk_path = os.path.join(tmp_dir, f"chunk_{len(chunk_files)}.jsonl")
-                    buffer.sort(key=self._sort_key)
+                    buffer.sort(key=self._sort_key, reverse=self.descending)
                     with open(chunk_path, 'w') as f:
                         for rec in buffer:
                             f.write(json.dumps(rec) + '\n')
                     chunk_files.append(chunk_path)
                     buffer.clear()
 
-                # K-way merge
                 key_idx = 0 if self.by == "key" else 1
+                descending = self.descending
 
                 class KeyedRecord:
                     __slots__ = ('key', 'seq', 'record')
@@ -158,7 +159,11 @@ class Sort(Stage):
                         self.record = record
                     def __lt__(self, other):
                         if self.key != other.key:
+                            if descending:
+                                return self.key > other.key
                             return self.key < other.key
+                        if descending:
+                            return self.seq > other.seq
                         return self.seq < other.seq
 
                 def keyed_chunk(path, start_seq):
@@ -170,16 +175,8 @@ class Sort(Stage):
                             seq += 1
 
                 keyed_iters = [keyed_chunk(p, i * self.memory_limit) for i, p in enumerate(chunk_files)]
-                merged = heapq.merge(*keyed_iters)
-
-                if self.descending:
-                    # Must materialize for descending since heapq.merge is ascending only
-                    results = [kr.record for kr in merged]
-                    results.reverse()
-                    yield from results
-                else:
-                    for kr in merged:
-                        yield kr.record
+                for kr in heapq.merge(*keyed_iters):
+                    yield kr.record
         finally:
             if tmp_dir:
                 for f in chunk_files:
@@ -293,15 +290,14 @@ class Pipeline:
                 first.source = input_data
             it = first._tracked_process(iter([]))
         elif input_data is not None:
-            # Provide input_data as ReadLines
             read_stage = ReadLines(input_data)
             it = read_stage.process(iter([]))
-            it = first._tracked_process(first._count_input(it))
+            it = first._tracked_process(it)
         else:
             it = first._tracked_process(iter([]))
 
         for stage in self._stages[1:]:
-            it = stage._tracked_process(stage._count_input(it))
+            it = stage._tracked_process(it)
 
         return it
 
@@ -328,7 +324,12 @@ class Pipeline:
 
     def run_lazy(self, input_data=None):
         """Execute the pipeline lazily, yielding output records."""
-        return self._build_iterator(input_data)
+        start = time.monotonic()
+        try:
+            yield from self._build_iterator(input_data)
+        finally:
+            elapsed = time.monotonic() - start
+            self._build_stats(elapsed)
 
     def _build_stats(self, total_elapsed):
         stats = PipelineStats()
