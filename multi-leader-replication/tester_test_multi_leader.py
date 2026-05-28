@@ -141,6 +141,30 @@ def test_convergence_many_keys():
     assert cluster.all_converged()
 
 
+def test_custom_merge_repeated_sync_converges():
+    """CUSTOM_MERGE must converge after repeated syncs, not explode."""
+    def counter_merge(key, local_val, remote_val, local_ts, remote_ts):
+        return local_val + remote_val
+
+    cluster = MultiLeaderCluster(
+        ["a", "b", "c"],
+        strategy=ConflictStrategy.CUSTOM_MERGE,
+        merge_fn=counter_merge,
+    )
+    cluster.node("a").put("counter", 5)
+    cluster.node("b").put("counter", 3)
+    cluster.sync()
+    val_after_first = cluster.node("a").get("counter")
+
+    for _ in range(5):
+        cluster.sync()
+
+    for nid in ["a", "b", "c"]:
+        assert cluster.node(nid).get("counter") == val_after_first, \
+            f"Node {nid} value changed after extra syncs: {cluster.node(nid).get('counter')} != {val_after_first}"
+    assert cluster.all_converged()
+
+
 if __name__ == "__main__":
     tests = [
         test_basic_replication_no_conflict,
@@ -153,6 +177,7 @@ if __name__ == "__main__":
         test_lamport_clock_ordering,
         test_idempotency,
         test_convergence_many_keys,
+        test_custom_merge_repeated_sync_converges,
     ]
     passed = 0
     failed = 0

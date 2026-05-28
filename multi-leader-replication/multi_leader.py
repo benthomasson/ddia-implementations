@@ -162,16 +162,16 @@ class ReplicaNode:
 
         elif strategy == ConflictStrategy.CUSTOM_MERGE:
             merged = merge_fn(key, display_local, display_remote, local_ts, remote_ts)
-            # Assign a new timestamp for the merged value
-            new_ts = self._tick()
-            self._store[key] = (merged, new_ts, self.node_id, False)
-            self._record_seen(key, new_ts, self.node_id)
-            # Queue merged result for propagation
+            new_ts = max(local_ts, remote_ts) + 1
+            canonical_origin = max(local_origin, remote_node)
+            self._clock = max(self._clock, new_ts)
+            self._store[key] = (merged, new_ts, canonical_origin, False)
+            self._record_seen(key, new_ts, canonical_origin)
             self._pending.append({
                 "key": key,
                 "value": merged,
                 "timestamp": new_ts,
-                "node_id": self.node_id,
+                "node_id": canonical_origin,
                 "is_tombstone": False,
             })
             record = ConflictRecord(
@@ -187,8 +187,8 @@ class ReplicaNode:
             raise ValueError(f"Unknown strategy: {strategy}")
 
         self._conflict_log.append(record)
-        # Queue the original remote change for propagation (ring)
-        self._pending.append(change)
+        if strategy != ConflictStrategy.CUSTOM_MERGE:
+            self._pending.append(change)
         return record
 
     @property
