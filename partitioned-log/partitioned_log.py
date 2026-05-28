@@ -55,7 +55,8 @@ class Topic:
 
     def append(self, partition: int, message: Message) -> int:
         """Append a message to a partition. Returns the assigned offset."""
-        offset = self._base_offsets[partition] + len(self._partitions[partition])
+        log = self._partitions[partition]
+        offset = log[-1].offset + 1 if log else self._base_offsets[partition]
         message.topic = self._name
         message.partition = partition
         message.offset = offset
@@ -64,12 +65,18 @@ class Topic:
 
     def read(self, partition: int, offset: int, max_messages: int) -> list[Message]:
         """Read messages from a partition starting at offset."""
-        base = self._base_offsets[partition]
         log = self._partitions[partition]
+        if not log:
+            return []
+        base = self._base_offsets[partition]
         if offset < base:
             offset = base
-        start = offset - base
-        if start >= len(log):
+        start = None
+        for i, msg in enumerate(log):
+            if msg.offset >= offset:
+                start = i
+                break
+        if start is None:
             return []
         end = min(start + max_messages, len(log))
         return log[start:end]
@@ -81,7 +88,10 @@ class Topic:
         return self._base_offsets[partition]
 
     def latest_offset(self, partition: int) -> int:
-        return self._base_offsets[partition] + len(self._partitions[partition])
+        log = self._partitions[partition]
+        if log:
+            return log[-1].offset + 1
+        return self._base_offsets[partition]
 
     def truncate(self, partition: int, count: int):
         """Remove count messages from the beginning of a partition."""

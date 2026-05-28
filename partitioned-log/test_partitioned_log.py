@@ -283,6 +283,49 @@ def test_more_consumers_than_partitions():
     print("PASS: test_more_consumers_than_partitions")
 
 
+def test_read_and_append_after_compaction():
+    """After compaction creates offset gaps, read/append/latest_offset still work correctly."""
+    broker = Broker()
+    broker.create_topic('t', num_partitions=1)
+    producer = Producer(broker)
+
+    producer.send('t', value='keep-0', key=None, partition=0)   # offset 0 - kept (no key)
+    producer.send('t', value='a-old', key='a', partition=0)     # offset 1 - removed
+    producer.send('t', value='keep-2', key=None, partition=0)   # offset 2 - kept (no key)
+    producer.send('t', value='a-new', key='a', partition=0)     # offset 3 - kept (last 'a')
+
+    topic = broker.get_topic('t')
+    result = broker.compact('t')
+    assert result['messages_removed'] == 1
+    assert result['messages_retained'] == 3
+
+    # Offsets should be non-contiguous: [0, 2, 3]
+    assert topic.earliest_offset(0) == 0
+    assert topic.latest_offset(0) == 4
+
+    # Reading from offset 3 should find the message despite the gap
+    msgs = topic.read(0, 3, 10)
+    assert len(msgs) == 1
+    assert msgs[0].value == 'a-new'
+
+    # Reading from offset 1 (removed) should skip to offset 2
+    msgs = topic.read(0, 1, 10)
+    assert len(msgs) == 2
+    assert msgs[0].offset == 2
+
+    # Consumer should read all retained messages
+    consumer = Consumer(broker, consumer_id='c1')
+    consumer.assign([('t', 0)])
+    msgs = consumer.poll()
+    assert len(msgs) == 3
+    assert [m.offset for m in msgs] == [0, 2, 3]
+
+    # Appending after compaction should get correct next offset
+    meta = producer.send('t', value='new', partition=0)
+    assert meta.offset == 4
+    print("PASS: test_read_and_append_after_compaction")
+
+
 def test_disk_persistence():
     """Test 8 (optional): Disk persistence - write, reload, verify."""
     tmpdir = tempfile.mkdtemp()
@@ -327,5 +370,6 @@ if __name__ == '__main__':
     test_retention_and_compaction()
     test_batch_produce_and_multiple_topics()
     test_more_consumers_than_partitions()
+    test_read_and_append_after_compaction()
     test_disk_persistence()
     print("\n=== ALL TESTS PASSED ===")
