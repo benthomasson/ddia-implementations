@@ -217,3 +217,61 @@ def test_sequence_numbers_strictly_increasing(db):
     events = db.cdc_log.read_from(0)
     for i in range(1, len(events)):
         assert events[i].sequence_number > events[i - 1].sequence_number
+
+
+def test_consumer_no_reprocess_after_compaction(db):
+    """Consumer must not re-process events after log compaction creates gaps in sequence numbers."""
+    db.insert("users", {"id": 1, "name": "A", "email": "a@b.com", "city": "X"})
+    db.update("users", 1, {"city": "Y"})
+    db.insert("users", {"id": 2, "name": "B", "email": "b@b.com", "city": "Z"})
+
+    log = db.cdc_log
+    seen = []
+    c = CDCConsumer("test", log)
+    c.on_all(lambda e: seen.append(e.sequence_number))
+
+    db.cdc_log.compact()
+
+    c.poll()
+    first_poll = list(seen)
+    assert len(first_poll) == 2
+
+    seen.clear()
+    c.poll()
+    assert len(seen) == 0, f"Events re-processed after compaction: {seen}"
+
+
+def test_materialized_view_no_reprocess_after_compaction(db):
+    """MaterializedView.refresh() must not re-apply events after compaction."""
+    db.insert("users", {"id": 1, "name": "A", "email": "a@b.com", "city": "X"})
+    db.update("users", 1, {"city": "Y"})
+    db.insert("users", {"id": 2, "name": "B", "email": "b@b.com", "city": "Z"})
+
+    log = db.cdc_log
+    db.cdc_log.compact()
+
+    mv = MaterializedView("copy", "users", log)
+    mv.refresh()
+    assert mv.get(1)["city"] == "Y"
+    assert mv.get(2)["name"] == "B"
+
+    count = mv.refresh()
+    assert count == 0, f"MaterializedView re-processed {count} events after compaction"
+
+
+def test_search_index_no_reprocess_after_compaction(db):
+    """SearchIndex.refresh() must not re-index events after compaction."""
+    db.insert("users", {"id": 1, "name": "Alice", "email": "a@b.com", "city": "X"})
+    db.update("users", 1, {"name": "Alicia"})
+    db.insert("users", {"id": 2, "name": "Bob", "email": "b@b.com", "city": "Y"})
+
+    log = db.cdc_log
+    db.cdc_log.compact()
+
+    si = SearchIndex("idx", "users", log, ["name"])
+    si.refresh()
+    assert len(si.search("alicia")) == 1
+    assert len(si.search("bob")) == 1
+
+    count = si.refresh()
+    assert count == 0, f"SearchIndex re-processed {count} events after compaction"

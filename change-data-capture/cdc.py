@@ -167,7 +167,8 @@ class CDCConsumer:
                 if op is not None and op != event.operation:
                     continue
                 handler(event)
-        self._position = self._position + len(events)
+        if events:
+            self._position = events[-1].sequence_number + 1
         return len(events)
 
     @property
@@ -208,7 +209,8 @@ class MaterializedView:
                 elif event.operation == Operation.DELETE:
                     self._data.pop(event.key, None)
             count += 1
-        self._position += count
+        if events:
+            self._position = events[-1].sequence_number + 1
         return count
 
     def get(self, pk_value: Any) -> Optional[dict]:
@@ -271,7 +273,8 @@ class SearchIndex:
                 elif event.operation == Operation.INSERT:
                     self._add_to_index(event.key, event.after)
             count += 1
-        self._position += count
+        if events:
+            self._position = events[-1].sequence_number + 1
         return count
 
     def search(self, keyword: str) -> list[dict]:
