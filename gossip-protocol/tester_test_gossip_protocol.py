@@ -175,3 +175,46 @@ def test_dead_node_rejoin():
 
     for nid in ["n0", "n1", "n3"]:
         assert "n2" in cluster.nodes[nid].get_alive_members()
+
+
+def test_join_does_not_use_stale_timestamp():
+    """Node joining at a later time must not be immediately marked dead by the seed."""
+    cluster = GossipCluster(t_suspect=3, t_dead=6, t_cleanup=12, seed=42)
+    for i in range(3):
+        cluster.add_node(f"n{i}")
+    cluster.run_rounds(20, start_time=0)
+
+    cluster.add_node("late_joiner")
+    cluster.gossip_round(20)
+
+    seed = None
+    for nid, node in cluster.nodes.items():
+        if nid != "late_joiner" and "late_joiner" in node.get_membership_list():
+            seed = node
+            break
+    assert seed is not None
+    ml = seed.get_membership_list()
+    assert ml["late_joiner"]["status"] == "alive", \
+        f"Newly joined node immediately marked {ml['late_joiner']['status']}"
+
+
+def test_new_node_via_gossip_gets_current_timestamp():
+    """When a node learns about a new peer through gossip, it should use current_time."""
+    n1 = GossipNode("n1")
+    n2 = GossipNode("n2")
+    n1.join(n2)
+
+    for t in range(20):
+        n1.heartbeat(t)
+        n2.heartbeat(t)
+
+    n3 = GossipNode("n3")
+    n3.join(n1)
+
+    n2.receive_gossip(n1.send_gossip(), current_time=20)
+    assert "n3" in n2.membership
+    assert n2.membership["n3"]["status"] == "alive"
+
+    n2.detect_failures(current_time=20)
+    assert n2.membership["n3"]["status"] == "alive", \
+        "Node learned via gossip should not be immediately suspected"

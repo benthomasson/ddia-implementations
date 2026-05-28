@@ -20,12 +20,13 @@ class GossipNode:
 
     def join(self, seed_node: 'GossipNode') -> None:
         """Join the cluster by contacting a seed node."""
-        # Copy seed's membership list
+        seed_time = seed_node.membership[seed_node.node_id]["timestamp_last_updated"]
         for nid, info in seed_node.membership.items():
             if nid != self.node_id:
                 self.membership[nid] = copy.deepcopy(info)
-        # Add self to seed's list
-        seed_node.membership[self.node_id] = copy.deepcopy(self.membership[self.node_id])
+        self.membership[self.node_id]["timestamp_last_updated"] = seed_time
+        my_entry = copy.deepcopy(self.membership[self.node_id])
+        seed_node.membership[self.node_id] = my_entry
 
     def leave(self) -> None:
         """Voluntarily leave the cluster. Marks self as dead.
@@ -50,10 +51,11 @@ class GossipNode:
         """Merge received membership list with local list."""
         for nid, remote in membership_list.items():
             if nid not in self.membership:
-                # Don't re-add nodes we've already cleaned up
                 if remote["status"] == "dead":
                     continue
-                self.membership[nid] = copy.deepcopy(remote)
+                entry = copy.deepcopy(remote)
+                entry["timestamp_last_updated"] = current_time
+                self.membership[nid] = entry
             else:
                 local = self.membership[nid]
                 if remote["heartbeat_counter"] > local["heartbeat_counter"]:
