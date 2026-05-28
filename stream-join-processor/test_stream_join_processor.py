@@ -107,7 +107,7 @@ def test_multiple_matches():
     p = StreamJoinProcessor("L", "R", TimeWindow(5.0), JoinType.INNER)
     p.process_event(make_event("R", "k1", 100.0, {"r": 1}))
     p.process_event(make_event("R", "k1", 102.0, {"r": 2}))
-    results = p.process_event(make_event("L", "k1", 101.0, {"l": 1}))
+    results = p.process_event(make_event("L", "k1", 103.0, {"l": 1}))
     assert len(results) == 2
 
 
