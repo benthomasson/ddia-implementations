@@ -127,5 +127,58 @@ def test_digest_computation():
     assert len(d1) == 64  # SHA-256 hex digest
 
 
+def test_equivocating_multiple_messages():
+    """Equivocating node should process all messages in a batch, not just the first."""
+    node = PBFTNode(1, 4, 1, ByzantineMode.EQUIVOCATING)
+    m1 = Message(MessageType.PREPARE, 0, 1, "d1", 1)
+    m2 = Message(MessageType.COMMIT, 0, 1, "d2", 1)
+    result = node._apply_byzantine([m1, m2])
+    types = {m.msg_type for m in result}
+    assert MessageType.PREPARE in types, "PREPARE missing from equivocated output"
+    assert MessageType.COMMIT in types, "COMMIT dropped by equivocating mode"
+
+
+def test_view_change_preserves_prepared():
+    """Auto-joining a view change should include the node's prepared requests."""
+    cluster = PBFTCluster(n=4, f=1)
+    cluster.submit_request("REQ_1")
+
+    # Manually get nodes 1 and 2 into prepared-not-committed for seq 2
+    digest = compute_digest("REQ_2")
+    pp = Message(MessageType.PRE_PREPARE, 0, 2, digest, 0, {"request": "REQ_2"})
+    r1 = cluster.get_node(1).receive_message(pp)
+    r2 = cluster.get_node(2).receive_message(pp)
+    for m in r1:
+        if m.msg_type == MessageType.PREPARE:
+            cluster.get_node(2).receive_message(m)
+    for m in r2:
+        if m.msg_type == MessageType.PREPARE:
+            cluster.get_node(1).receive_message(m)
+
+    node2 = cluster.get_node(2)
+    assert any(s == 2 for _, s in node2.prepared_requests)
+    assert not any(s == 2 for _, s in node2.committed_requests)
+
+    # Trigger auto-join via a VIEW-CHANGE from another node
+    # Node 2 is non-primary for view 1 (primary=1), so it will auto-join
+    vc = Message(MessageType.VIEW_CHANGE, 1, 0, "", 3, {"prepared": []})
+    result = node2.receive_message(vc)
+    own_vc = [m for m in result if m.msg_type == MessageType.VIEW_CHANGE
+              and m.sender == node2.node_id]
+    assert len(own_vc) == 1
+    assert len(own_vc[0].data["prepared"]) > 0, \
+        "Auto-joined VIEW-CHANGE should include prepared requests"
+
+
+def test_reject_prepare_from_primary():
+    """PREPAREs sent by the current view's primary should be rejected."""
+    node = PBFTNode(1, 4, 1)
+    # Primary in view 0 is node 0
+    digest = compute_digest("test")
+    prepare_from_primary = Message(MessageType.PREPARE, 0, 1, digest, sender=0)
+    result = node.receive_message(prepare_from_primary)
+    assert result == [], "PREPARE from primary should be rejected"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

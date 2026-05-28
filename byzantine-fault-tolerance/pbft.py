@@ -128,7 +128,6 @@ class PBFTNode:
                 if m.recipient is not None:
                     result.append(m)
                 else:
-                    # Send different digests to different peers
                     for peer in range(self.total_nodes):
                         if peer != self.node_id:
                             equivocated = Message(
@@ -137,7 +136,6 @@ class PBFTNode:
                                 m.sender, dict(m.data), recipient=peer
                             )
                             result.append(equivocated)
-                return result
             return result
         return messages
 
@@ -215,7 +213,8 @@ class PBFTNode:
         return result
 
     def _handle_prepare(self, msg: Message) -> list[Message]:
-        # Primary doesn't send PREPARE, but receives them
+        if msg.sender == msg.view % self.total_nodes:
+            return []
         if self._is_duplicate(msg):
             return []
 
@@ -366,12 +365,12 @@ class PBFTNode:
             return self._apply_byzantine(self._initiate_view_change())
         return []
 
-    def _initiate_view_change(self) -> list[Message]:
-        new_view = self.current_view + 1
-
-        # Collect prepared but not committed requests
+    def _collect_prepared_data(self) -> list[dict]:
+        """Collect prepared-but-not-committed requests for view change messages."""
         prepared_data = []
         for (v, s) in self.prepared_requests:
+            if (v, s) in self.committed_requests:
+                continue
             log = self._get_log(v, s)
             if log[MessageType.PRE_PREPARE]:
                 pp = log[MessageType.PRE_PREPARE][0]
@@ -379,11 +378,15 @@ class PBFTNode:
                     "view": v, "sequence": s,
                     "digest": pp.digest, "request": pp.data.get("request")
                 })
+        return prepared_data
+
+    def _initiate_view_change(self) -> list[Message]:
+        new_view = self.current_view + 1
 
         vc = Message(
             MessageType.VIEW_CHANGE, new_view, 0,
             "", self.node_id,
-            {"prepared": prepared_data}
+            {"prepared": self._collect_prepared_data()}
         )
 
         # Store our own VC so the new primary counts it
@@ -416,7 +419,7 @@ class PBFTNode:
                 vc = Message(
                     MessageType.VIEW_CHANGE, target_view, 0,
                     "", self.node_id,
-                    {"prepared": []}
+                    {"prepared": self._collect_prepared_data()}
                 )
                 self.view_change_msgs[target_view].append(vc)
                 return self._apply_byzantine([vc])
