@@ -245,7 +245,12 @@ class WriteAheadLog:
         return result
 
     def _read_all_records(self) -> Iterator[WALRecord]:
-        """Read all valid records from all WAL files, stopping at corruption."""
+        """Read all valid records from all WAL files in sequence order.
+
+        Verifies that sequence numbers are monotonically increasing and
+        stops at any out-of-order record (treats it as corruption).
+        """
+        last_seq = 0
         for path in self._wal_files():
             with open(path, "rb") as f:
                 while True:
@@ -253,6 +258,9 @@ class WriteAheadLog:
                         rec = _read_record(f)
                         if rec is None:
                             break
+                        if rec.seq_num <= last_seq:
+                            return
+                        last_seq = rec.seq_num
                         yield rec
                     except ValueError:
                         return

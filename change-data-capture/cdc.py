@@ -1,5 +1,6 @@
 """Change Data Capture (CDC) system — in-memory database with append-only change log."""
 
+import os
 from typing import Any, Optional, Callable
 from enum import Enum
 from dataclasses import dataclass, field
@@ -142,11 +143,25 @@ class CDCDatabase:
 class CDCConsumer:
     """Subscribes to CDC log and processes events."""
 
-    def __init__(self, name: str, log: CDCLog):
+    def __init__(self, name: str, log: CDCLog, offset_file: Optional[str] = None):
         self.name = name
         self._log = log
-        self._position = 0
+        self._offset_file = offset_file
+        self._position = self._load_position()
         self._handlers: list[tuple[Optional[str], Optional[Operation], Callable]] = []
+
+    def _load_position(self) -> int:
+        if self._offset_file and os.path.exists(self._offset_file):
+            with open(self._offset_file, "r") as f:
+                return int(f.read().strip())
+        return 0
+
+    def _save_position(self):
+        if self._offset_file:
+            with open(self._offset_file, "w") as f:
+                f.write(str(self._position))
+                f.flush()
+                os.fsync(f.fileno())
 
     def on(self, table: str, operation: Optional[Operation],
            handler: Callable[[ChangeEvent], None]):
@@ -169,6 +184,7 @@ class CDCConsumer:
                 handler(event)
         if events:
             self._position = events[-1].sequence_number + 1
+            self._save_position()
         return len(events)
 
     @property
@@ -178,6 +194,7 @@ class CDCConsumer:
     def seek(self, position: int):
         """Reset consumer position."""
         self._position = position
+        self._save_position()
 
 
 class MaterializedView:

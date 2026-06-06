@@ -237,6 +237,9 @@ class BitcaskStore:
                     payload = f.read(key_size + value_size)
                     if len(payload) < key_size + value_size:
                         break
+                    expected_crc = zlib.crc32(payload) & 0xFFFFFFFF
+                    if crc != expected_crc:
+                        break
                     total_records += 1
                     key = payload[:key_size].decode("utf-8")
                     value = payload[key_size:]
@@ -268,6 +271,9 @@ class BitcaskStore:
                     header = f.read(HEADER_SIZE)
                     crc, key_size, value_size = struct.unpack(HEADER_FMT, header)
                     payload = f.read(key_size + value_size)
+                    expected_crc = zlib.crc32(payload) & 0xFFFFFFFF
+                    if crc != expected_crc:
+                        continue
                     value = payload[key_size:]
 
                 key_bytes = key.encode("utf-8")
@@ -373,6 +379,9 @@ class BitcaskStore:
                         crc, key_size, value_size = struct.unpack(HEADER_FMT, header)
                         payload = sf.read(key_size + value_size)
                         if len(payload) < key_size + value_size:
+                            break
+                        expected_crc = zlib.crc32(payload) & 0xFFFFFFFF
+                        if crc != expected_crc:
                             break
                         key = payload[:key_size].decode("utf-8")
                         value = payload[key_size:]

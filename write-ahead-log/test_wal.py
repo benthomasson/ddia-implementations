@@ -122,6 +122,59 @@ def test_large_values():
         wal.close()
     print("PASSED: large values")
 
+def test_torn_write():
+    """Simulate a torn write (partial record at end of WAL) and verify replay skips it."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wal = WriteAheadLog(tmpdir, sync_mode="sync")
+        wal.append("PUT", "good1", "v1")
+        wal.append("PUT", "good2", "v2")
+        wal.close()
+
+        # Append a partial record (torn write) to the WAL file
+        wal_files = sorted(f for f in os.listdir(tmpdir) if f.endswith(".wal"))
+        wal_path = os.path.join(tmpdir, wal_files[-1])
+        with open(wal_path, "ab") as f:
+            # Write a valid length prefix but truncated record body
+            import struct
+            f.write(struct.pack("<I", 999))  # claims 999 bytes follow
+            f.write(b"\x00" * 10)            # but only 10 bytes written
+
+        wal2 = WriteAheadLog(tmpdir, sync_mode="sync")
+        records = wal2.replay()
+        assert len(records) == 2, f"expected 2 good records, got {len(records)}"
+        assert records[0].key == "good1"
+        assert records[1].key == "good2"
+        wal2.close()
+    print("PASSED: torn write recovery")
+
+def test_incomplete_batch():
+    """Simulate crash mid-batch: BEGIN + records but no COMMIT."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from wal import _encode_record, OP_BEGIN, OP_BYTES
+        wal = WriteAheadLog(tmpdir, sync_mode="sync")
+        wal.append("PUT", "solo", "v1")
+        wal.append_batch([("PUT", "batch1", "v1"), ("PUT", "batch2", "v2")])
+        # Manually write an incomplete batch (BEGIN + PUT, no COMMIT)
+        wal_path = wal._current_file
+        seq = wal.current_seq_num()
+        with open(wal_path, "ab") as f:
+            f.write(_encode_record(seq + 1, OP_BEGIN, b"", b""))
+            f.write(_encode_record(seq + 2, OP_BYTES["PUT"],
+                                   b"orphan", b"should_not_appear"))
+            f.flush()
+            os.fsync(f.fileno())
+
+        wal2 = WriteAheadLog(tmpdir, sync_mode="sync")
+        records = wal2.replay()
+        keys = [r.key for r in records]
+        assert "solo" in keys, "individual record should survive"
+        assert "batch1" in keys, "complete batch should survive"
+        assert "batch2" in keys, "complete batch should survive"
+        assert "orphan" not in keys, "incomplete batch should be discarded"
+        assert len(records) == 3, f"expected 3, got {len(records)}"
+        wal2.close()
+    print("PASSED: incomplete batch discarded")
+
 if __name__ == "__main__":
     test_basic()
     test_crash_recovery()
@@ -132,4 +185,6 @@ if __name__ == "__main__":
     test_empty()
     test_sync_modes()
     test_large_values()
+    test_torn_write()
+    test_incomplete_batch()
     print("\nALL TESTS PASSED")

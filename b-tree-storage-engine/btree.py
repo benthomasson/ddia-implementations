@@ -68,6 +68,7 @@ class PageManager:
         self._f.seek(0)
         self._f.write(data)
         self._f.flush()
+        os.fsync(self._f.fileno())
 
     def _write_empty_leaf(self, page_num):
         data = struct.pack(HEADER_FMT, LEAF, 0)
@@ -216,7 +217,9 @@ def _serialize_leaf(keys, values, next_sibling=NO_SIBLING):
 
 def _deserialize_leaf(data):
     """Returns (keys, values, next_sibling)."""
-    _, num_keys = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
+    page_type, num_keys = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
+    if page_type != LEAF:
+        raise ValueError(f"Expected LEAF page (type {LEAF}), got type {page_type}")
     offset = HEADER_SIZE
     next_sib = struct.unpack('>I', data[offset:offset+4])[0]
     offset += 4
@@ -249,7 +252,9 @@ def _serialize_internal(keys, children):
 
 def _deserialize_internal(data):
     """Returns (keys, children)."""
-    _, num_keys = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
+    page_type, num_keys = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
+    if page_type != INTERNAL:
+        raise ValueError(f"Expected INTERNAL page (type {INTERNAL}), got type {page_type}")
     offset = HEADER_SIZE
     child0 = struct.unpack('>I', data[offset:offset+4])[0]
     offset += 4
