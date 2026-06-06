@@ -144,6 +144,7 @@ class BitcaskStore:
         offset = self._active_file.tell()
         self._active_file.write(header + payload)
         self._active_file.flush()
+        os.fsync(self._active_file.fileno())
         return offset
 
     def put(self, key: str, value: bytes) -> int:
@@ -401,3 +402,5 @@ class BitcaskStore:
                             key_bytes = key.encode("utf-8")
                             hf.write(struct.pack(HINT_ENTRY_FMT, len(key_bytes), offset))
                             hf.write(key_bytes)
+                hf.flush()
+                os.fsync(hf.fileno())

@@ -122,6 +122,11 @@ class WriteAheadLog:
             next_num = int(os.path.basename(files[-1]).split(".")[0]) + 1
         self._current_file = os.path.join(self._dir, f"{next_num:06d}.wal")
         self._fd = open(self._current_file, "ab")
+        dir_fd = os.open(self._dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
     def _do_sync(self, force: bool = False):
         """Fsync based on sync mode."""

@@ -130,6 +130,8 @@ class EventStore:
                 "metadata": event.metadata,
             }
             f.write(json.dumps(record) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
     def _load_from_file(self, path: str):
         with open(path, "r") as f:

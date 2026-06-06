@@ -96,6 +96,8 @@ class SSTableWriter:
 
         self._f.seek(0)
         self._f.write(struct.pack(HEADER_FMT, MAGIC, VERSION, self._count))
+        self._f.flush()
+        os.fsync(self._f.fileno())
         self._f.close()
 
         file_size = os.path.getsize(self._filepath)
