@@ -2,6 +2,7 @@
 
 import hashlib
 import bisect
+import threading
 from typing import Dict, List, Tuple
 
 RING_SIZE = 2**32
@@ -21,9 +22,14 @@ class ConsistentHashRing:
         self._ring_positions: List[int] = []  # sorted hash positions
         self._ring_nodes: List[str] = []      # node id at each position
         self._nodes: Dict[str, float] = {}    # node_id -> weight
+        self._lock = threading.Lock()
 
     def add_node(self, node_id: str, weight: float = 1.0) -> Dict:
         """Add a physical node. Returns {(start, end): (from_node, to_node)} transfers."""
+        with self._lock:
+            return self._add_node(node_id, weight)
+
+    def _add_node(self, node_id: str, weight: float = 1.0) -> Dict:
         if node_id in self._nodes:
             return {}
         self._nodes[node_id] = weight
@@ -47,6 +53,10 @@ class ConsistentHashRing:
 
     def remove_node(self, node_id: str) -> Dict:
         """Remove a physical node. Returns {(start, end): (from_node, to_node)} transfers."""
+        with self._lock:
+            return self._remove_node(node_id)
+
+    def _remove_node(self, node_id: str) -> Dict:
         if node_id not in self._nodes:
             raise ValueError(f"Node {node_id} not in ring")
         del self._nodes[node_id]
@@ -67,6 +77,10 @@ class ConsistentHashRing:
 
     def get_node(self, key: str) -> str:
         """Return the primary node for the given key."""
+        with self._lock:
+            return self._get_node(key)
+
+    def _get_node(self, key: str) -> str:
         if not self._ring_positions:
             raise ValueError("Empty ring")
         pos = _hash(key)
@@ -77,6 +91,10 @@ class ConsistentHashRing:
 
     def get_nodes(self, key: str) -> List[str]:
         """Return RF distinct physical nodes for the key (preference list)."""
+        with self._lock:
+            return self._get_nodes(key)
+
+    def _get_nodes(self, key: str) -> List[str]:
         if len(self._nodes) < self.replication_factor:
             raise ValueError(
                 f"Not enough nodes ({len(self._nodes)}) for replication factor {self.replication_factor}"

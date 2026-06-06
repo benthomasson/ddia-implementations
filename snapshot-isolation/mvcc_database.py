@@ -1,5 +1,7 @@
 """Snapshot Isolation (MVCC) database implementation."""
 
+import threading
+
 
 class TransactionError(Exception):
     """Raised for invalid transaction operations."""
@@ -45,6 +47,7 @@ class MVCCDatabase:
     """MVCC database with snapshot isolation."""
 
     def __init__(self):
+        self._lock = threading.RLock()
         self._next_tx_id = 1
         self._next_timestamp = 1
         self._versions = {}  # key -> list[Version]
@@ -56,6 +59,10 @@ class MVCCDatabase:
 
     def begin_transaction(self, read_only=False):
         """Start a new transaction."""
+        with self._lock:
+            return self._begin_transaction(read_only)
+
+    def _begin_transaction(self, read_only=False):
         tx_id = self._next_tx_id
         self._next_tx_id += 1
         ts = self._next_timestamp
@@ -123,6 +130,10 @@ class MVCCDatabase:
 
     def read(self, tx, key):
         """Read a key within a transaction's snapshot."""
+        with self._lock:
+            return self._read(tx, key)
+
+    def _read(self, tx, key):
         self._check_active(tx)
 
         if key not in self._versions:
@@ -138,6 +149,10 @@ class MVCCDatabase:
 
     def write(self, tx, key, value):
         """Write a key within a transaction."""
+        with self._lock:
+            return self._write(tx, key, value)
+
+    def _write(self, tx, key, value):
         self._check_writable(tx)
 
         # If this tx already wrote to this key, update that version in place
@@ -156,6 +171,10 @@ class MVCCDatabase:
 
     def delete(self, tx, key):
         """Delete a key within a transaction."""
+        with self._lock:
+            return self._delete(tx, key)
+
+    def _delete(self, tx, key):
         self._check_writable(tx)
 
         if key not in self._versions:
@@ -176,6 +195,10 @@ class MVCCDatabase:
 
     def commit(self, tx):
         """Attempt to commit a transaction. Returns True if successful."""
+        with self._lock:
+            return self._commit(tx)
+
+    def _commit(self, tx):
         self._check_active(tx)
 
         if tx.read_only:
@@ -194,7 +217,7 @@ class MVCCDatabase:
                             v.created_by in tx.active_at_start or v.created_by >= tx.tx_id
                         ):
                             # Conflict: this tx committed after our start
-                            self.abort(tx)
+                            self._abort(tx)
                             return False
 
         # Commit
@@ -207,6 +230,10 @@ class MVCCDatabase:
 
     def abort(self, tx):
         """Abort a transaction."""
+        with self._lock:
+            return self._abort(tx)
+
+    def _abort(self, tx):
         self._check_active(tx)
         tx._status = "aborted"
         self._aborted.add(tx.tx_id)
@@ -220,6 +247,10 @@ class MVCCDatabase:
 
     def scan(self, tx, prefix=""):
         """Scan all keys visible to this transaction, optionally filtered by prefix."""
+        with self._lock:
+            return self._scan(tx, prefix)
+
+    def _scan(self, tx, prefix=""):
         self._check_active(tx)
         result = {}
         for key in self._versions:
@@ -231,6 +262,10 @@ class MVCCDatabase:
 
     def garbage_collect(self):
         """Remove versions no longer visible to any active transaction."""
+        with self._lock:
+            return self._garbage_collect()
+
+    def _garbage_collect(self):
         active_txs = [t for t in self._transactions.values() if t.is_active]
         removed = 0
 
