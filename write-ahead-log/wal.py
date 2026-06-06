@@ -209,13 +209,15 @@ class WriteAheadLog:
                 if not kept:
                     os.remove(path)
                 else:
-                    with open(path, "wb") as f:
+                    tmp_path = path + ".tmp"
+                    with open(tmp_path, "wb") as f:
                         for rec in kept:
                             f.write(_encode_record(rec.seq_num, OP_BYTES[rec.op_type],
                                                    rec.key.encode("utf-8"),
                                                    rec.value.encode("utf-8")))
                         f.flush()
                         os.fsync(f.fileno())
+                    os.rename(tmp_path, path)
             self._open_latest()
 
     def replay(self, after_seq: int = 0) -> List[WALRecord]:

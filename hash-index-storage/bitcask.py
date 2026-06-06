@@ -276,6 +276,8 @@ class BitcaskStore:
             self.keydir[key] = new_entry
             hint_entries.append((key, new_entry))
 
+        merged_file.flush()
+        os.fsync(merged_file.fileno())
         merged_file.close()
         self._write_hint_file(merged_file_id, hint_entries)
         self.file_handles[merged_file_id] = open(self._data_path(merged_file_id), "rb")
@@ -287,6 +289,11 @@ class BitcaskStore:
         self.active_file_id = merged_file_id + 1
         os.rename(self._data_path(old_active_id),
                   self._data_path(self.active_file_id))
+        dir_fd = os.open(self.data_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
         for key, entry in self.keydir.items():
             if entry.file_id == old_active_id:
                 entry.file_id = self.active_file_id
