@@ -305,13 +305,13 @@ class LSMTree:
         if not self._memtable:
             return
         frozen = self._memtable
-        self._memtable = SortedDict()
         seq = self._next_seq()
         path = os.path.join(self._dir, f"sst_{seq:06d}.sst")
         entries = list(frozen.items())
         sst = SSTable.write(path, seq, entries, self._sparse_interval)
         self._sstables.append(sst)
         self._wal.truncate()
+        self._memtable = SortedDict()
         # Auto-compact if threshold exceeded
         if len(self._sstables) >= self._compaction_threshold:
             self.compact()

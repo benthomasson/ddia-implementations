@@ -145,6 +145,7 @@ class WAL:
     # Entry format: seq(4B) + page_num(4B) + data_len(4B) + data + checksum(4B)
     ENTRY_HEADER = '>III'
     ENTRY_HEADER_SIZE = struct.calcsize('>III')
+    COMMIT_PAGE_NUM = 0xFFFFFFFF
 
     def __init__(self, wal_path):
         self.wal_path = wal_path
@@ -162,6 +163,13 @@ class WAL:
         os.fsync(self._f.fileno())
 
     def commit(self, page_manager):
+        self._seq += 1
+        header = struct.pack(self.ENTRY_HEADER, self._seq, self.COMMIT_PAGE_NUM, 0)
+        checksum = struct.pack('>I', self._checksum(b''))
+        self._f.seek(0, 2)
+        self._f.write(header + checksum)
+        self._f.flush()
+        os.fsync(self._f.fileno())
         page_manager.sync()
         self._f.seek(0)
         self._f.truncate(0)
@@ -175,6 +183,7 @@ class WAL:
         if not data:
             return 0
         offset = 0
+        pending = []
         recovered = 0
         while offset + self.ENTRY_HEADER_SIZE <= len(data):
             seq, page_num, data_len = struct.unpack(
@@ -186,10 +195,17 @@ class WAL:
             offset += data_len
             checksum = struct.unpack('>I', data[offset:offset + 4])[0]
             offset += 4
-            if self._checksum(page_data) == checksum:
-                page_manager.write_page(page_num, page_data)
-                recovered += 1
-        page_manager.sync()
+            if self._checksum(page_data) != checksum:
+                break
+            if page_num == self.COMMIT_PAGE_NUM:
+                for pn, pd in pending:
+                    page_manager.write_page(pn, pd)
+                    recovered += 1
+                pending = []
+            else:
+                pending.append((page_num, page_data))
+        if recovered:
+            page_manager.sync()
         self._f.seek(0)
         self._f.truncate(0)
         self._f.flush()
@@ -516,10 +532,13 @@ class BTree:
         """Return all (key, value) pairs where start_key <= key < end_key."""
         self.pm.reset_counters()
         root, height, _, _, _ = self._read_meta()
-        # Find the leaf containing start_key
         leaf_num = self._find_leaf(root, start_key, height)
         results = []
+        visited = set()
         while leaf_num != NO_SIBLING:
+            if leaf_num in visited:
+                raise ValueError(f"Cycle detected in sibling chain at page {leaf_num}")
+            visited.add(leaf_num)
             data = self.pm.read_page(leaf_num)
             keys, values, next_sib = _deserialize_leaf(data)
             for k, v in zip(keys, values):
