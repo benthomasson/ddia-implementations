@@ -138,15 +138,22 @@ class Client:
             del self._held_tokens[lock_name]
         return result
 
-    def get_token(self, lock_name: str) -> FencingToken | None:
+    def get_token(self, lock_name: str, current_time: int | None = None) -> FencingToken | None:
         """Get the fencing token for a lock this client holds."""
-        return self._held_tokens.get(lock_name)
+        token = self._held_tokens.get(lock_name)
+        if token and current_time is not None and token.is_expired(current_time):
+            del self._held_tokens[lock_name]
+            return None
+        return token
 
     def write_to_resource(self, server: FencedResourceServer,
                           resource: str, key: str, value: any,
-                          lock_name: str) -> dict:
+                          lock_name: str, current_time: int | None = None) -> dict:
         """Write to a fenced resource using the held lock's token."""
         token = self._held_tokens.get(lock_name)
         if not token:
             return {'success': False, 'error': f'Client does not hold lock {lock_name}'}
+        if current_time is not None and token.is_expired(current_time):
+            del self._held_tokens[lock_name]
+            return {'success': False, 'error': f'Lock {lock_name} has expired'}
         return server.write(resource, key, value, token.token)

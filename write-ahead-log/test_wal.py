@@ -16,9 +16,9 @@ def test_basic():
             ("PUT", "order:2", "item_b"),
             ("DELETE", "order:0", ""),
         ])
-        assert wal.current_seq_num() == 7
+        assert wal.current_seq_num() == 8
         cp_seq = wal.checkpoint()
-        assert cp_seq == 8
+        assert cp_seq == 9
         records = wal.replay()
         assert len(records) == 6, f"expected 6, got {len(records)}"
         records = wal.replay(after_seq=cp_seq)
@@ -88,8 +88,9 @@ def test_iterate():
         wal.append("PUT", "x", "1")
         wal.append_batch([("PUT", "y", "2"), ("PUT", "z", "3")])
         all_recs = list(wal.iterate())
-        assert len(all_recs) == 4, f"expected 4, got {len(all_recs)}"
-        assert all_recs[3].op_type == "COMMIT"
+        assert len(all_recs) == 5, f"expected 5, got {len(all_recs)}"
+        assert all_recs[1].op_type == "BEGIN"
+        assert all_recs[4].op_type == "COMMIT"
         wal.close()
     print("PASSED: iterate")
 

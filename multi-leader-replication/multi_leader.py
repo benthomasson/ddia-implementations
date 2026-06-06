@@ -204,6 +204,8 @@ class MultiLeaderCluster:
                  strategy: ConflictStrategy = ConflictStrategy.LAST_WRITE_WINS,
                  merge_fn: Optional[Callable] = None,
                  topology: Topology = Topology.ALL_TO_ALL):
+        if strategy == ConflictStrategy.CUSTOM_MERGE and merge_fn is None:
+            raise ValueError("CUSTOM_MERGE strategy requires a merge_fn")
         self._strategy = strategy
         self._merge_fn = merge_fn
         self._topology = topology

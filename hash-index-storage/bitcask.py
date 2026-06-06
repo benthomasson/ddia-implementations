@@ -280,7 +280,22 @@ class BitcaskStore:
         self._write_hint_file(merged_file_id, hint_entries)
         self.file_handles[merged_file_id] = open(self._data_path(merged_file_id), "rb")
 
-        # Delete old immutable files
+        # Rename active file first (atomic on POSIX), then delete old files.
+        # This ordering ensures a crash always leaves valid data on disk.
+        self.active_file.close()
+        old_active_id = self.active_file_id
+        self.active_file_id = merged_file_id + 1
+        os.rename(self._data_path(old_active_id),
+                  self._data_path(self.active_file_id))
+        for key, entry in self.keydir.items():
+            if entry.file_id == old_active_id:
+                entry.file_id = self.active_file_id
+        if old_active_id in self.file_handles:
+            self.file_handles[old_active_id].close()
+            del self.file_handles[old_active_id]
+        self._open_active_file()
+
+        # Delete old immutable files (safe: merged file is already in place)
         for fid in immutable_ids:
             data_path = self._data_path(fid)
             hint_path = self._hint_path(fid)
@@ -288,23 +303,6 @@ class BitcaskStore:
                 os.remove(data_path)
             if os.path.exists(hint_path):
                 os.remove(hint_path)
-
-        # Update active file id to be after merged files
-        self.active_file.close()
-        old_active_id = self.active_file_id
-        self.active_file_id = merged_file_id + 1
-        # Rename old active file to new id
-        os.rename(self._data_path(old_active_id),
-                  self._data_path(self.active_file_id))
-        # Update keydir entries pointing to old active
-        for key, entry in self.keydir.items():
-            if entry.file_id == old_active_id:
-                entry.file_id = self.active_file_id
-        # Reopen active file
-        if old_active_id in self.file_handles:
-            self.file_handles[old_active_id].close()
-            del self.file_handles[old_active_id]
-        self._open_active_file()
 
     def close(self) -> None:
         """Flush and close all file handles."""

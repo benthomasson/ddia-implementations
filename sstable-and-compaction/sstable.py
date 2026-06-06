@@ -52,10 +52,14 @@ class SSTableWriter:
         self._index_entries: list = []
         self._min_key: Optional[str] = None
         self._max_key: Optional[str] = None
+        self._last_key: Optional[str] = None
         self._timestamp = 0.0
 
     def add(self, key: str, value: Optional[str], timestamp: float) -> None:
         """Add a sorted entry. Keys must be added in sorted order."""
+        if self._last_key is not None and key <= self._last_key:
+            raise ValueError(f"Keys must be added in sorted order: {key!r} <= {self._last_key!r}")
+        self._last_key = key
         key_bytes = key.encode("utf-8")
         offset = self._f.tell()
 

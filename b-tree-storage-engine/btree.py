@@ -17,6 +17,10 @@ NO_SIBLING = 0xFFFFFFFF
 META_FMT = '>5I'
 META_SIZE = struct.calcsize(META_FMT)
 
+# Page size is stored immediately after the core metadata (offset META_SIZE within page 0)
+PAGE_SIZE_FMT = '>I'
+PAGE_SIZE_OFFSET = META_SIZE
+
 # Page header: type(1B), num_keys(2B)
 HEADER_FMT = '>BH'
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
@@ -33,10 +37,30 @@ class PageManager:
         existed = os.path.exists(file_path)
         self._f = open(file_path, 'r+b' if existed else 'w+b')
         if not existed:
-            # Write initial metadata page
             self._write_meta(1, 1, 0, 2, NO_SIBLING)
-            # Write empty root leaf page (page 1)
+            self._write_page_size(page_size)
             self._write_empty_leaf(1)
+        else:
+            stored = self._read_page_size()
+            if stored == 0:
+                self._write_page_size(page_size)
+            elif stored != page_size:
+                raise ValueError(
+                    f"Page size mismatch: file was created with {stored}, "
+                    f"but opened with {page_size}"
+                )
+
+    def _read_page_size(self):
+        self._f.seek(PAGE_SIZE_OFFSET)
+        raw = self._f.read(4)
+        if len(raw) < 4:
+            return 0
+        return struct.unpack(PAGE_SIZE_FMT, raw)[0]
+
+    def _write_page_size(self, page_size):
+        self._f.seek(PAGE_SIZE_OFFSET)
+        self._f.write(struct.pack(PAGE_SIZE_FMT, page_size))
+        self._f.flush()
 
     def _write_meta(self, root, height, total_keys, next_free, free_head):
         data = struct.pack(META_FMT, root, height, total_keys, next_free, free_head)

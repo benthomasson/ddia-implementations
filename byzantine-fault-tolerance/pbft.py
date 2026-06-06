@@ -43,7 +43,7 @@ class Message:
 
 def compute_digest(request) -> str:
     """Compute SHA-256 digest of a request."""
-    return hashlib.sha256(json.dumps(request, sort_keys=True, default=str).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
 
 
 class PBFTNode:

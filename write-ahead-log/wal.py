@@ -11,7 +11,9 @@ OP_PUT = 1
 OP_DELETE = 2
 OP_COMMIT = 3
 OP_CHECKPOINT = 4
-OP_NAMES = {OP_PUT: "PUT", OP_DELETE: "DELETE", OP_COMMIT: "COMMIT", OP_CHECKPOINT: "CHECKPOINT"}
+OP_BEGIN = 5
+OP_NAMES = {OP_PUT: "PUT", OP_DELETE: "DELETE", OP_COMMIT: "COMMIT",
+            OP_CHECKPOINT: "CHECKPOINT", OP_BEGIN: "BEGIN"}
 OP_BYTES = {v: k for k, v in OP_NAMES.items()}
 
 
@@ -151,9 +153,11 @@ class WriteAheadLog:
             return seq
 
     def append_batch(self, operations: List[Tuple[str, str, str]]) -> int:
-        """Atomically append a batch with COMMIT. Returns COMMIT sequence number."""
+        """Atomically append a batch with BEGIN/COMMIT. Returns COMMIT sequence number."""
         with self._lock:
             buf = bytearray()
+            self._seq_num += 1
+            buf.extend(_encode_record(self._seq_num, OP_BEGIN, b"", b""))
             for op_type, key, value in operations:
                 self._seq_num += 1
                 buf.extend(_encode_record(self._seq_num, OP_BYTES[op_type],
@@ -212,21 +216,32 @@ class WriteAheadLog:
     def replay(self, after_seq: int = 0) -> List[WALRecord]:
         """Replay committed records with seq_num > after_seq.
 
-        Skips uncommitted batches; stops at corruption.
+        Individual PUT/DELETE records outside a batch are included directly.
+        Batch records (between BEGIN and COMMIT) are only included if the
+        COMMIT is present; incomplete batches are discarded.
         """
         with self._lock:
             if self._fd:
                 self._fd.flush()
-        # Individual writes (no COMMIT needed) and batch writes (have COMMIT)
-        # are indistinguishable in the log format since there's no batch-start
-        # marker. All PUT/DELETE records are included; COMMIT/CHECKPOINT are
-        # filtered out. This matches the spec example behavior.
         result = []
+        in_batch = False
+        batch_buf: List[WALRecord] = []
         for rec in self._read_all_records():
             if rec.seq_num <= after_seq:
                 continue
-            if rec.op_type in ("PUT", "DELETE"):
-                result.append(rec)
+            if rec.op_type == "BEGIN":
+                in_batch = True
+                batch_buf = []
+            elif rec.op_type == "COMMIT":
+                if in_batch:
+                    result.extend(batch_buf)
+                in_batch = False
+                batch_buf = []
+            elif rec.op_type in ("PUT", "DELETE"):
+                if in_batch:
+                    batch_buf.append(rec)
+                else:
+                    result.append(rec)
         return result
 
     def _read_all_records(self) -> Iterator[WALRecord]:

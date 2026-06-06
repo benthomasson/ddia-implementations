@@ -281,30 +281,26 @@ class BitcaskStore:
         # Atomically update index
         self._index.update(new_index_entries)
 
-        # Close any cached handles for old segments
-        for seg_path in frozen:
-            handle = self._file_handles.pop(seg_path, None)
-            if handle:
-                handle.close()
-
-        # Delete old frozen segments and their hint files
-        for seg_path in frozen:
-            os.remove(seg_path)
-            hint = self._hint_path(seg_path)
-            if os.path.exists(hint):
-                os.remove(hint)
-
-        # Reopen active segment (bump counter so active has highest ID)
+        # Rename active file first (atomic on POSIX), then delete old files.
+        # This ordering ensures a crash always leaves valid data on disk.
         self._segment_counter += 1
         new_active_path = self._segment_path(self._segment_counter)
-        # Rename old active to new ID so it remains the active segment
         os.rename(old_active_path, new_active_path)
-        # Update index entries that pointed to old active path
         for key in list(self._index):
             if self._index[key][0] == old_active_path:
                 self._index[key] = (new_active_path, self._index[key][1])
         self._active_path = new_active_path
         self._active_file = open(new_active_path, "ab")
+
+        # Close cached handles and delete old frozen segments (safe: merged file is already in place)
+        for seg_path in frozen:
+            handle = self._file_handles.pop(seg_path, None)
+            if handle:
+                handle.close()
+            os.remove(seg_path)
+            hint = self._hint_path(seg_path)
+            if os.path.exists(hint):
+                os.remove(hint)
 
         stale_removed = total_records - len(entries_to_write)
         return stale_removed
