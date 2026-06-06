@@ -4,6 +4,7 @@ import os
 import struct
 import bisect
 import heapq
+import zlib
 from typing import Optional, List, Tuple
 from sortedcontainers import SortedDict
 
@@ -19,10 +20,10 @@ class WAL:
 
     def append(self, key: str, value: bytes):
         k = key.encode("utf-8")
-        self._fd.write(struct.pack(">I", len(k)))
-        self._fd.write(k)
-        self._fd.write(struct.pack(">I", len(value)))
-        self._fd.write(value)
+        payload = struct.pack(">I", len(k)) + k + struct.pack(">I", len(value)) + value
+        crc = zlib.crc32(payload) & 0xFFFFFFFF
+        self._fd.write(struct.pack(">I", crc))
+        self._fd.write(payload)
         self._fd.flush()
 
     def replay(self) -> List[Tuple[str, bytes]]:
@@ -36,20 +37,28 @@ class WAL:
         while pos < len(data):
             if pos + 4 > len(data):
                 break
-            klen = struct.unpack(">I", data[pos:pos + 4])[0]
-            pos += 4
-            if pos + klen > len(data):
+            stored_crc = struct.unpack(">I", data[pos:pos + 4])[0]
+            record_start = pos + 4
+            if record_start + 4 > len(data):
                 break
-            key = data[pos:pos + klen].decode("utf-8")
-            pos += klen
-            if pos + 4 > len(data):
+            klen = struct.unpack(">I", data[record_start:record_start + 4])[0]
+            kstart = record_start + 4
+            if kstart + klen > len(data):
                 break
-            vlen = struct.unpack(">I", data[pos:pos + 4])[0]
-            pos += 4
-            if pos + vlen > len(data):
+            key = data[kstart:kstart + klen].decode("utf-8")
+            vlen_start = kstart + klen
+            if vlen_start + 4 > len(data):
                 break
-            value = data[pos:pos + vlen]
-            pos += vlen
+            vlen = struct.unpack(">I", data[vlen_start:vlen_start + 4])[0]
+            vstart = vlen_start + 4
+            if vstart + vlen > len(data):
+                break
+            value = data[vstart:vstart + vlen]
+            payload = data[record_start:vstart + vlen]
+            expected_crc = zlib.crc32(payload) & 0xFFFFFFFF
+            if stored_crc != expected_crc:
+                break
+            pos = vstart + vlen
             entries.append((key, value))
         return entries
 

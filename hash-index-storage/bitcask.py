@@ -3,12 +3,13 @@
 import os
 import struct
 import time
+import zlib
 from dataclasses import dataclass
 from typing import Optional
 
 
-HEADER_FORMAT = "<dII"  # timestamp(double), key_size(uint32), value_size(uint32)
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)  # 16 bytes
+HEADER_FORMAT = "<IdII"  # crc32(uint32), timestamp(double), key_size(uint32), value_size(uint32)
+HEADER_SIZE = struct.calcsize(HEADER_FORMAT)  # 20 bytes
 
 HINT_FORMAT = "<IQId"  # file_id(uint32), offset(uint64), size(uint32), timestamp(double)
 HINT_HEADER_SIZE = struct.calcsize(HINT_FORMAT)
@@ -79,8 +80,10 @@ class BitcaskStore:
         ts = time.time()
         key_bytes = key.encode("utf-8")
         val_bytes = value.encode("utf-8")
-        header = struct.pack(HEADER_FORMAT, ts, len(key_bytes), len(val_bytes))
-        record = header + key_bytes + val_bytes
+        payload = key_bytes + val_bytes
+        crc = zlib.crc32(payload) & 0xFFFFFFFF
+        header = struct.pack(HEADER_FORMAT, crc, ts, len(key_bytes), len(val_bytes))
+        record = header + payload
         offset = self.active_file.tell()
         self.active_file.write(record)
         self.active_file.flush()
@@ -93,9 +96,13 @@ class BitcaskStore:
         reader = self._get_reader(file_id)
         reader.seek(offset)
         data = reader.read(size)
-        ts, key_size, val_size = struct.unpack(HEADER_FORMAT, data[:HEADER_SIZE])
-        key = data[HEADER_SIZE:HEADER_SIZE + key_size].decode("utf-8")
-        value = data[HEADER_SIZE + key_size:HEADER_SIZE + key_size + val_size].decode("utf-8")
+        crc, ts, key_size, val_size = struct.unpack(HEADER_FORMAT, data[:HEADER_SIZE])
+        payload = data[HEADER_SIZE:HEADER_SIZE + key_size + val_size]
+        expected_crc = zlib.crc32(payload) & 0xFFFFFFFF
+        if crc != expected_crc:
+            raise IOError(f"CRC mismatch at file {file_id} offset {offset}")
+        key = payload[:key_size].decode("utf-8")
+        value = payload[key_size:].decode("utf-8")
         return key, value, ts
 
     def _maybe_rotate(self):
@@ -126,14 +133,17 @@ class BitcaskStore:
             header_data = reader.read(HEADER_SIZE)
             if len(header_data) < HEADER_SIZE:
                 break
-            ts, key_size, val_size = struct.unpack(HEADER_FORMAT, header_data)
-            key_bytes = reader.read(key_size)
-            reader.read(val_size)  # skip value
-            key = key_bytes.decode("utf-8")
+            crc, ts, key_size, val_size = struct.unpack(HEADER_FORMAT, header_data)
+            payload = reader.read(key_size + val_size)
+            if len(payload) < key_size + val_size:
+                break
+            expected_crc = zlib.crc32(payload) & 0xFFFFFFFF
+            if crc != expected_crc:
+                break
+            key = payload[:key_size].decode("utf-8")
             record_size = HEADER_SIZE + key_size + val_size
 
             if val_size == 0:
-                # Tombstone - remove from keydir
                 self.keydir.pop(key, None)
             else:
                 self.keydir[key] = KeyEntry(file_id, offset, record_size, ts)
@@ -212,13 +222,17 @@ class BitcaskStore:
                 header_data = reader.read(HEADER_SIZE)
                 if len(header_data) < HEADER_SIZE:
                     break
-                ts, key_size, val_size = struct.unpack(HEADER_FORMAT, header_data)
-                key = reader.read(key_size).decode("utf-8")
-                reader.read(val_size)
+                crc, ts, key_size, val_size = struct.unpack(HEADER_FORMAT, header_data)
+                payload = reader.read(key_size + val_size)
+                if len(payload) < key_size + val_size:
+                    break
+                expected_crc = zlib.crc32(payload) & 0xFFFFFFFF
+                if crc != expected_crc:
+                    break
+                key = payload[:key_size].decode("utf-8")
                 record_size = HEADER_SIZE + key_size + val_size
 
                 if val_size == 0:
-                    # Tombstone - remove during compaction
                     latest.pop(key, None)
                 else:
                     if key not in latest or ts > latest[key][3]:
@@ -252,7 +266,7 @@ class BitcaskStore:
             old_reader.seek(old_offset)
             record_data = old_reader.read(old_size)
             old_reader.close()
-            _, key_size, val_size = struct.unpack(HEADER_FORMAT, record_data[:HEADER_SIZE])
+            _, _, key_size, val_size = struct.unpack(HEADER_FORMAT, record_data[:HEADER_SIZE])
             value = record_data[HEADER_SIZE + key_size:].decode("utf-8")
 
             # Check if we need to rotate merged file
@@ -264,10 +278,11 @@ class BitcaskStore:
                 merged_file_id += 1
                 merged_file = open(self._data_path(merged_file_id), "ab")
 
-            # Write record with original timestamp
             key_bytes = key.encode("utf-8")
             val_bytes = value.encode("utf-8")
-            header = struct.pack(HEADER_FORMAT, ts, len(key_bytes), len(val_bytes))
+            payload = key_bytes + val_bytes
+            new_crc = zlib.crc32(payload) & 0xFFFFFFFF
+            header = struct.pack(HEADER_FORMAT, new_crc, ts, len(key_bytes), len(val_bytes))
             record = header + key_bytes + val_bytes
             new_offset = merged_file.tell()
             merged_file.write(record)

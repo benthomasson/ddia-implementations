@@ -4,6 +4,7 @@ import heapq
 import os
 import struct
 import time
+import zlib
 from dataclasses import dataclass
 from typing import Iterator, List, Optional
 
@@ -66,17 +67,19 @@ class SSTableWriter:
         if self._count % self._block_size == 0:
             self._index_entries.append((key_bytes, offset))
 
-        # Entry format: [key_len:2][key][timestamp:8][tombstone|value_len:4+value]
-        self._f.write(struct.pack(">H", len(key_bytes)))
-        self._f.write(key_bytes)
-        self._f.write(struct.pack(">d", timestamp))
+        # Entry format: [crc:4][key_len:2][key][timestamp:8][tombstone|value_len:4+value]
+        entry_buf = struct.pack(">H", len(key_bytes)) + key_bytes
+        entry_buf += struct.pack(">d", timestamp)
 
         if value is None:
-            self._f.write(struct.pack("B", TOMBSTONE_MARKER))
+            entry_buf += struct.pack("B", TOMBSTONE_MARKER)
         else:
             val_bytes = value.encode("utf-8")
-            self._f.write(struct.pack(">I", len(val_bytes)))
-            self._f.write(val_bytes)
+            entry_buf += struct.pack(">I", len(val_bytes)) + val_bytes
+
+        crc = zlib.crc32(entry_buf) & 0xFFFFFFFF
+        self._f.write(struct.pack(">I", crc))
+        self._f.write(entry_buf)
 
         if self._min_key is None:
             self._min_key = key
@@ -163,11 +166,20 @@ class SSTableReader:
     @staticmethod
     def _read_entry(f) -> Optional[SSTableEntry]:
         """Read one entry from current file position."""
+        crc_data = f.read(4)
+        if len(crc_data) < 4:
+            return None
+        stored_crc = struct.unpack(">I", crc_data)[0]
+
+        entry_start = f.tell()
+
         data = f.read(2)
         if len(data) < 2:
             return None
         klen = struct.unpack(">H", data)[0]
-        key = f.read(klen).decode("utf-8")
+        key_data = f.read(klen)
+        if len(key_data) < klen:
+            return None
 
         ts_data = f.read(8)
         if len(ts_data) < 8:
@@ -178,12 +190,28 @@ class SSTableReader:
         if len(marker) < 1:
             return None
         if marker[0] == TOMBSTONE_MARKER:
-            return SSTableEntry(key=key, value=None, timestamp=timestamp)
+            entry_end = f.tell()
+            f.seek(entry_start)
+            entry_bytes = f.read(entry_end - entry_start)
+            expected_crc = zlib.crc32(entry_bytes) & 0xFFFFFFFF
+            if stored_crc != expected_crc:
+                raise IOError("SSTable entry CRC mismatch")
+            return SSTableEntry(key=key_data.decode("utf-8"), value=None, timestamp=timestamp)
 
         remaining = f.read(3)
         vlen = struct.unpack(">I", marker + remaining)[0]
-        value = f.read(vlen).decode("utf-8")
-        return SSTableEntry(key=key, value=value, timestamp=timestamp)
+        value_data = f.read(vlen)
+        if len(value_data) < vlen:
+            return None
+
+        entry_end = f.tell()
+        f.seek(entry_start)
+        entry_bytes = f.read(entry_end - entry_start)
+        expected_crc = zlib.crc32(entry_bytes) & 0xFFFFFFFF
+        if stored_crc != expected_crc:
+            raise IOError("SSTable entry CRC mismatch")
+
+        return SSTableEntry(key=key_data.decode("utf-8"), value=value_data.decode("utf-8"), timestamp=timestamp)
 
     def _iter_entries_from(self, f, start_offset) -> Iterator[SSTableEntry]:
         """Iterate entries from offset until index block."""

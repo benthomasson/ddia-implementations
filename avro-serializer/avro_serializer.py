@@ -664,16 +664,28 @@ def _resolve_check(writer, reader):
 # --- Schema Registry ---
 
 class SchemaRegistry:
-    """Simple in-memory schema registry."""
+    """Simple in-memory schema registry with optional compatibility checking."""
 
     def __init__(self):
         self._schemas = {}
         self._next_id = 1
+        self._subjects = {}  # subject -> [schema_id, ...]
 
-    def register(self, schema):
+    def register(self, schema, subject=None):
+        if subject and subject in self._subjects:
+            prev_id = self._subjects[subject][-1]
+            prev_schema = self._schemas[prev_id]
+            compat = check_compatibility(prev_schema, schema)
+            if not compat["backward_compatible"]:
+                raise ValueError(
+                    f"Schema not backward compatible with {subject} v{len(self._subjects[subject])}: "
+                    + "; ".join(compat["errors"])
+                )
         sid = self._next_id
         self._schemas[sid] = schema
         self._next_id += 1
+        if subject:
+            self._subjects.setdefault(subject, []).append(sid)
         return sid
 
     def get(self, schema_id):
