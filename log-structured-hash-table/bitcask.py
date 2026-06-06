@@ -205,7 +205,16 @@ class BitcaskStore:
     def __len__(self) -> int:
         return len(self._index)
 
-    def __iter__(self) -> Iterator[tuple[str, bytes]]:
+    def __getitem__(self, key: str) -> bytes:
+        value = self.get(key)
+        if value is None:
+            raise KeyError(key)
+        return value
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(list(self._index.keys()))
+
+    def items(self) -> Iterator[tuple[str, bytes]]:
         for key in list(self._index.keys()):
             value = self.get(key)
             if value is not None:
